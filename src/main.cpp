@@ -4,71 +4,23 @@
 #include <time.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
-#include <PubSubClient.h>
+#include <esp_now.h>
+
 
 TFT_eSPI tft = TFT_eSPI();
-WiFiClient espClient;
-PubSubClient pubSubClient(espClient);
 
 uint8_t backlight = BL_MIN;
 uint32_t current_color = THIS_BLACK;
 struct tm timeinfo;
+typedef struct struct_message {
+    bool on;
+    bool colour;
+} struct_message;
 
-void callback(char *topic, byte *payload, unsigned int length) {
-    String sTopic(topic);
-    String sPayload(payload, length);
+struct_message myData;
 
-    if (sTopic == BIN_TOPIC) {
-        if (sPayload == RECYCLES) {
-            Serial.println("New state is Recycles");
-            if (current_color != THIS_YELLOW) {
-                current_color = THIS_YELLOW;
-                tft.fillScreen(current_color);
-            }
-            return;
-        } else if (sPayload == LANDFILL){
-            Serial.println("New state is Landfill");
-            if (current_color != THIS_RED) {
-                current_color = THIS_RED;
-                tft.fillScreen(current_color);
-            }
-            return;
-        }
-    }
-    Serial.println("Unknown topic: " + sTopic + " with payload: " + sPayload); 
-}
-
-void pubSubSetup() {
-  pubSubClient.setServer(MQTT_BROKER, MQTT_PORT);
-  pubSubClient.setCallback(callback);
-  while (!pubSubClient.connected()) {
-      String client_id = "esp32-client-";
-      client_id += String(WiFi.macAddress());
-      Serial.printf("The client %s connects to the public MQTT broker\n", client_id.c_str());
-      if (pubSubClient.connect(client_id.c_str())) { 
-          Serial.println("EMQX MQTT broker connected");
-      } else {
-          Serial.print("failed with state ");
-          Serial.print(pubSubClient.state());
-          delay(2000);
-      }
-  }
-  pubSubClient.subscribe(BIN_TOPIC);
-}
-
-void setupWiFi() {
-  Serial.println("Connecting to WiFi...");
-  
-  WiFi.begin(WIFI_SSID, WIFI_PWD);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
-  configTzTime(TIMEZONE, "nz.pool.ntp.org");
-}
+//   -DLANDFILL=0
+//   -DRECYCLES=1
 
 void setBacklight(int8_t value) {
     if (backlight != value) {
@@ -77,50 +29,63 @@ void setBacklight(int8_t value) {
     }
 }
 
-void setupBacklight() {
-    getLocalTime(&timeinfo);
-    if (timeinfo.tm_wday == WEEKDAY) {
-        if (timeinfo.tm_hour >= START_HOUR && timeinfo.tm_hour < END_HOUR) {
-            setBacklight(BL_MAX);
-        } else {
-            setBacklight(BL_MIN);
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+    memcpy(&myData, incomingData, sizeof(myData));
+
+    if (myData.colour == 0) {
+        if (current_color != THIS_RED) {
+            current_color = THIS_RED;
+            tft.fillScreen(current_color);
         }
+        Serial.println("Red");
+    } else {
+        if (current_color != THIS_YELLOW) {
+            current_color = THIS_YELLOW;
+            tft.fillScreen(current_color);
+        }
+        Serial.println("Yellow");
+    }
+
+    if (myData.on) {
+        setBacklight(BL_MAX);
+        Serial.println("Backlight ON");
     } else {
         setBacklight(BL_MIN);
+        Serial.println("Backlight OFF");
     }
+ 
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println("Connecting to WiFi...");
-  setupWiFi();
+    Serial.begin(115200);
 
-  tft.init();
-  tft.invertDisplay(true);
-  tft.fillScreen(current_color);
-  dacWrite(TFT_BL, backlight);
+    tft.init();
+    tft.invertDisplay(true);
+    tft.fillScreen(current_color);
+    dacWrite(TFT_BL, backlight);
 
-  pubSubSetup();
+    WiFi.mode(WIFI_STA);
+    WiFi.softAP("MyReceiverNetwork", "password123", 2, false);
+    // Print own MAC address
+    String mac = WiFi.macAddress();
+    Serial.print("My MAC Address: ");
+    Serial.println(mac);
+    Serial.print("WiFi Channel: ");
+    Serial.println(WiFi.channel());
 
-  ArduinoOTA.setHostname("garbage-monitor");
-  ArduinoOTA.begin();
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+
+    esp_now_register_recv_cb(OnDataRecv);
+
+    ArduinoOTA.setHostname("garbage-monitor-display");
+    ArduinoOTA.begin();
 }
 
 void loop() {
-  pubSubClient.loop();
-  ArduinoOTA.handle();
-
-  if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Reconnecting WiFi");
-      setupWiFi();
-  }
-  if (!pubSubClient.connected() && WiFi.status() == WL_CONNECTED) {
-      Serial.println("Reconnecting MQTT");
-      pubSubSetup();
-  }
-
-  setupBacklight();
-
-  delay(500);
+    ArduinoOTA.handle();
+    delay(500);
 }
 
